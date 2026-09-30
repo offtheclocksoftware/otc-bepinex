@@ -1,0 +1,87 @@
+<Project>
+  <!--
+    otc_bepinex: Off the Clock shared C# helpers for BepInEx plugins, compiled INTO each plugin (no extra DLL to ship).
+    Docs: README.md next to this file. MIT license.
+
+    Use (in the game's Directory.Build.props, or in a csproj):
+      <PropertyGroup>
+        <OtcRuntime>IL2CPP</OtcRuntime>        <!- Mono (BepInEx 5) or IL2CPP (BepInEx 6); inferred from an earlier
+                                                    TargetFramework when left empty: netstandard*/net4* = Mono, net6+ = IL2CPP ->
+        <OtcNotice>false</OtcNotice>           <!- optional: no IMGUI notice (the game refs lack UnityEngine.IMGUIModule) ->
+        <OtcKeys>false</OtcKeys>               <!- optional: no hotkeys (no UnityEngine.InputLegacyModule reference needed) ->
+      </PropertyGroup>
+      <Import Project="path\to\otc-bepinex\OtcBepInEx.props" />
+
+    What it does:
+      - defines OTC_MONO or OTC_IL2CPP (the sources refuse to compile without one of them);
+      - links src\*.cs into the project (shown under "otc_bepinex" in the IDE);
+      - generates obj\...\OtcHost.g.cs: a MonoBehaviour named OtcGenerated.<AssemblyName>.OtcHostBehaviour whose Update
+        (and OnGUI when OtcNotice is on) drives OtcHost. The name is unique per plugin on purpose: Il2CppInterop's
+        ClassInjector refuses a second injected type with the same full name ("is already injected"), so one shared
+        class would break the second plugin loaded in the same game. OtcGenerateHost=false turns it off (then
+        write your own behaviour and call OtcHost.Attach<T>(this)).
+  -->
+  <PropertyGroup>
+    <OtcBepInExDir>$(MSBuildThisFileDirectory)</OtcBepInExDir>
+    <OtcRuntime Condition="'$(OtcRuntime)' == '' and ($(TargetFramework.StartsWith('netstandard')) or $(TargetFramework.StartsWith('net4')))">Mono</OtcRuntime>
+    <OtcRuntime Condition="'$(OtcRuntime)' == '' and $(TargetFramework.StartsWith('net')) and '$(TargetFramework)' != ''">IL2CPP</OtcRuntime>
+    <OtcKeys Condition="'$(OtcKeys)' == ''">true</OtcKeys>
+    <OtcNotice Condition="'$(OtcNotice)' == ''">true</OtcNotice>
+    <OtcGenerateHost Condition="'$(OtcGenerateHost)' == ''">true</OtcGenerateHost>
+    <DefineConstants Condition="'$(OtcRuntime)' == 'Mono'">$(DefineConstants);OTC_MONO</DefineConstants>
+    <DefineConstants Condition="'$(OtcRuntime)' == 'IL2CPP'">$(DefineConstants);OTC_IL2CPP</DefineConstants>
+    <DefineConstants Condition="'$(OtcKeys)' == 'true'">$(DefineConstants);OTC_KEYS</DefineConstants>
+    <DefineConstants Condition="'$(OtcNotice)' == 'true'">$(DefineConstants);OTC_NOTICE</DefineConstants>
+    <!-- Never ship the local library path (CallerFilePath in OtcPatch.Guard etc.): map it like the project folder. -->
+    <PathMap Condition="'$(PathMap)' == ''">$(OtcBepInExDir)=/_otc_bepinex/</PathMap>
+    <PathMap Condition="'$(PathMap)' != '' and !$(PathMap.Contains('/_otc_bepinex/'))">$(PathMap),$(OtcBepInExDir)=/_otc_bepinex/</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(OtcBepInExDir)src\*.cs" Link="otc_bepinex\%(Filename)%(Extension)" />
+    <Compile Remove="$(OtcBepInExDir)src\OtcKeys.cs" Condition="'$(OtcKeys)' != 'true'" />
+    <Compile Remove="$(OtcBepInExDir)src\OtcNotice.cs" Condition="'$(OtcNotice)' != 'true'" />
+  </ItemGroup>
+
+  <Target Name="OtcCheckRuntime" BeforeTargets="CoreCompile">
+    <Error Condition="'$(OtcRuntime)' != 'Mono' and '$(OtcRuntime)' != 'IL2CPP'"
+           Text="otc_bepinex: set OtcRuntime to Mono (BepInEx 5) or IL2CPP (BepInEx 6) before importing OtcBepInEx.props (got '$(OtcRuntime)')." />
+  </Target>
+
+  <!-- Per-plugin host MonoBehaviour (see the header). Semicolons are written as %3B (MSBuild splits items on ;). Deterministic: the text depends only on AssemblyName and the switches. -->
+  <Target Name="OtcGenerateHostSource" BeforeTargets="BeforeCompile;CoreCompile" Condition="'$(OtcGenerateHost)' == 'true'">
+    <PropertyGroup>
+      <OtcHostNs>OtcGenerated.$([System.Text.RegularExpressions.Regex]::Replace('$(AssemblyName)', '[^A-Za-z0-9_]', '_'))</OtcHostNs>
+      <OtcHostFile>$(IntermediateOutputPath)OtcHost.g.cs</OtcHostFile>
+      <OtcHostCtor Condition="'$(OtcRuntime)' == 'IL2CPP'">        public OtcHostBehaviour(System.IntPtr ptr) : base(ptr) { }</OtcHostCtor>
+      <OtcHostCtor Condition="'$(OtcRuntime)' != 'IL2CPP'">        // Mono: Unity creates it through AddComponent, no IntPtr constructor needed.</OtcHostCtor>
+      <OtcHostGui Condition="'$(OtcNotice)' == 'true'">        private void OnGUI() { OffTheClock.Lib.OtcHost.RunGui()%3B }</OtcHostGui>
+      <OtcHostGui Condition="'$(OtcNotice)' != 'true'">        // no OnGUI: OtcNotice is off for this plugin</OtcHostGui>
+    </PropertyGroup>
+    <ItemGroup>
+      <OtcHostLine Include="// &lt;auto-generated&gt; by otc-bepinex OtcBepInEx.props. Do not edit. &lt;/auto-generated&gt;" />
+      <OtcHostLine Include="namespace $(OtcHostNs)" />
+      <OtcHostLine Include="{" />
+      <OtcHostLine Include="    /// &lt;summary&gt;Drives OtcHost (keys, notice) on Unity's main thread. Unique name per plugin (IL2CPP class injection).&lt;/summary&gt;" />
+      <OtcHostLine Include="    public class OtcHostBehaviour : UnityEngine.MonoBehaviour" />
+      <OtcHostLine Include="    {" />
+      <OtcHostLine Include="$(OtcHostCtor)" />
+      <OtcHostLine Include="        private void Update() { OffTheClock.Lib.OtcHost.RunUpdate()%3B }" />
+      <OtcHostLine Include="$(OtcHostGui)" />
+      <OtcHostLine Include="    }" />
+      <OtcHostLine Include="}" />
+      <OtcHostLine Include="namespace OffTheClock.Lib" />
+      <OtcHostLine Include="{" />
+      <OtcHostLine Include="    internal static partial class OtcHost" />
+      <OtcHostLine Include="    {" />
+      <OtcHostLine Include="        static partial void AttachGenerated(object plugin, ref bool attached) { attached = Attach&lt;$(OtcHostNs).OtcHostBehaviour&gt;(plugin)%3B }" />
+      <OtcHostLine Include="    }" />
+      <OtcHostLine Include="}" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(OtcHostFile)" Lines="@(OtcHostLine)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(OtcHostFile)" />
+      <FileWrites Include="$(OtcHostFile)" />
+    </ItemGroup>
+  </Target>
+</Project>
